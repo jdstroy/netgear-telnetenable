@@ -22,8 +22,9 @@ import sys
 import socket
 import array
 from optparse import OptionParser
-from Crypto.Cipher import Blowfish
-from Crypto.Hash import MD5
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+import hashlib
 
 TELNET_PORT = 23
 
@@ -31,45 +32,51 @@ TELNET_PORT = 23
 # assumes Big-Endian data, but the code does nothing to convert the
 # little-endian stuff it's getting on intel to Big-Endian
 #
-# So, since Crypto.Cipher.Blowfish seems to assume native endianness, we need
+# So, since cryptography.hazmat seems to assume native endianness, we need
 # to byteswap our buffer before and after encrypting it
 #
-# This helper does the byteswapping on the string buffer
+# This helper does the byteswapping on the bytes buffer
 def ByteSwap(data):
   a = array.array('i')
-  if(a.itemsize < 4):
+  if a.itemsize < 4:
     a = array.array('L')
   
-  if(a.itemsize != 4):
-    print "Need a type that is 4 bytes on your platform so we can fix the data!"
-    exit(1)
+  if a.itemsize != 4:
+    print("Need a type that is 4 bytes on your platform so we can fix the data!")
+    sys.exit(1)
 
-  a.fromstring(data)
+  a.frombytes(data)
   a.byteswap()
-  return a.tostring()
+  return a.tobytes()
 
 def GeneratePayload(mac, username, password=""):
   # eventually reformat mac
-  mac = mac.replace(":","").upper()
+  mac = mac.replace(":", "").upper()
 
   # Pad the input correctly
-  assert(len(mac) < 0x10)
-  just_mac = mac.ljust(0x10, "\x00")
+  assert len(mac) < 0x10
+  just_mac = mac.encode().ljust(0x10, b"\x00")
 
-  assert(len(username) <= 0x10)
-  just_username = username.ljust(0x10, "\x00")
+  assert len(username) <= 0x10
+  just_username = username.encode().ljust(0x10, b"\x00")
   
-  assert(len(password) <= 0x21)
-  just_password = password.ljust(0x21, "\x00")
+  assert len(password) <= 0x21
+  just_password = password.encode().ljust(0x21, b"\x00")
 
-  cleartext = (just_mac + just_username + just_password).ljust(0x70, '\x00')
-  md5_key = MD5.new(cleartext).digest()
+  cleartext = (just_mac + just_username + just_password).ljust(0x70, b'\x00')
+  md5_key = hashlib.md5(cleartext).digest()
 
-  payload = ByteSwap((md5_key + cleartext).ljust(0x80, "\x00"))
+  payload = ByteSwap((md5_key + cleartext).ljust(0x80, b"\x00"))
   
-  secret_key = "AMBIT_TELNET_ENABLE+" + password
+  secret_key = b"AMBIT_TELNET_ENABLE+" + password.encode()
 
-  return ByteSwap(Blowfish.new(secret_key, 1).encrypt(payload))
+  cipher = Cipher(
+      algorithms.Blowfish(secret_key),
+      modes.ECB(),
+      backend=default_backend()
+  )
+  encryptor = cipher.encryptor()
+  return ByteSwap(encryptor.update(payload) + encryptor.finalize())
 
 
 def SendPayload(ip, payload):
@@ -77,29 +84,30 @@ def SendPayload(ip, payload):
     af, socktype, proto, canonname, sa = res
     try:
       s = socket.socket(af, socktype, proto)
-    except socket.error, msg:
+    except socket.error as msg:
       s = None
       continue
 
     try:
       s.connect(sa)
-    except socket.error, msg:
+    except socket.error as msg:
       s.close()
-      s= None
+      s = None
       continue
     break
 
   if s is None:
-    print "Could not connect to '%s:%d'" % (ip, TELNET_PORT)
+    print("Could not connect to '%s:%d'" % (ip, TELNET_PORT))
   else:
     s.send(payload)
     s.close()
-    print "Sent telnet enable payload to '%s:%d'" % (ip, TELNET_PORT)
+    print("Sent telnet enable payload to '%s:%d'" % (ip, TELNET_PORT))
   
 def main():
   args = sys.argv[1:]
   if len(args) < 3 or len(args) > 4:
-    print "usage: python telnetenable.py <ip> <mac> <username> [<password>]"
+    print("usage: python telnetenable.py <ip> <mac> <username> [<password>]")
+    sys.exit(1)
 
   ip = args[0]
   mac = args[1]
@@ -112,4 +120,5 @@ def main():
   payload = GeneratePayload(mac, username, password)
   SendPayload(ip, payload)
 
-main()
+if __name__ == "__main__":
+  main()
